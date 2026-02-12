@@ -87,7 +87,6 @@ class MyService(Service):
 
         # Read input bytes
         raw = data["image"].data  # bytes
-        input_type = data["image"].type
 
         img = Image.open(io.BytesIO(raw)).convert("RGB")
         img_np = np.array(img)
