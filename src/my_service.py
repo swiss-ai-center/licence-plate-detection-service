@@ -1,3 +1,10 @@
+from common_code.config import get_settings
+from common_code.logger.logger import get_logger, Logger
+from common_code.service.models import Service
+from common_code.service.enums import ServiceStatus
+from common_code.common.enums import FieldDescriptionType, ExecutionUnitTagName, ExecutionUnitTagAcronym
+from common_code.common.models import FieldDescription, ExecutionUnitTag
+from common_code.tasks.models import TaskData
 # Imports required by the service's model
 import io
 import json
@@ -21,6 +28,7 @@ Detect licence plates in an uploaded image.
 """
 api_title = "Licence Plate Detection API"
 version = "0.0.1"
+
 
 class MyService(Service):
     """
@@ -155,6 +163,3 @@ class MyService(Service):
                 type=FieldDescriptionType.APPLICATION_ZIP,
             ),
         }
-
-
-service_service: ServiceService | None = None
