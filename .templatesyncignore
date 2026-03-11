@@ -1,6 +1,6 @@
-src/*
-!src/main.py
-!src/utils.py
+/src/*
+!/src/main.py
+!/src/utils.py
 README.md
 requirements.txt
 pyproject.toml
