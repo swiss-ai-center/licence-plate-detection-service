@@ -59,11 +59,31 @@ class MyService(Service):
             ],
             data_out_fields=[
                 FieldDescription(
-                    name="detections", type=[FieldDescriptionType.APPLICATION_JSON]
+                    name="detections", type=[FieldDescriptionType.APPLICATION_JSON],
+                    format_hint={
+                        "image": "image",
+                        "count": 1,
+                        "detections": [
+                            {
+                                "bbox": ["x1", "y1", "x2", "y2"],
+                                "confidence": 0.95,
+                                "label": "licence_plate",
+                                "crop_file": "plate_001.png"
+                            },
+                            # ... more detections
+                        ],
+                    }
                 ),
                 FieldDescription(
                     name="crops",
                     type=[FieldDescriptionType.APPLICATION_ZIP],
+                    format_hint={
+                        "tree": [
+                            {"name": "plate_000.png", "kind": "file"},
+                            {"name": "plate_001.png", "kind": "file"},
+                            {"name": "...", "kind": "file"},
+                        ]
+                    }
                 ),
             ],
             tags=[
