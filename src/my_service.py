@@ -8,7 +8,6 @@ from common_code.tasks.models import TaskData
 # Imports required by the service's model
 import io
 import json
-import zipfile
 
 import numpy as np
 from PIL import Image
@@ -17,14 +16,13 @@ from ultralytics import YOLO
 settings = get_settings()
 
 api_description = """License Plate Detection Service
-Detect licence plates in a single image using a YOLOv8 model.
+Detect licence plates in one or more images using a YOLOv8 model.
 
-The service returns a JSON with bounding boxes, confidence
-scores, and names of cropped plate images, along with a ZIP
-of the cropped images.
+The service returns a JSON summary per input image and a list
+of cropped plate images.
 """
 api_summary = """License Plate Detection Service
-Detect licence plates in an uploaded image.
+Detect licence plates in uploaded image(s).
 """
 api_title = "Licence Plate Detection API"
 version = "0.0.1"
@@ -39,6 +37,7 @@ class MyService(Service):
     # Any additional fields must be excluded for Pydantic to work
     _model: object
     _logger: Logger
+    allow_lists: bool = True
 
     def __init__(self):
         super().__init__(
@@ -76,12 +75,12 @@ class MyService(Service):
                 ),
                 FieldDescription(
                     name="crops",
-                    type=[FieldDescriptionType.APPLICATION_ZIP],
+                    type=[FieldDescriptionType.IMAGE_PNG],
                     format_hint={
-                        "tree": [
-                            {"name": "plate_000.png", "kind": "file"},
-                            {"name": "plate_001.png", "kind": "file"},
-                            {"name": "...", "kind": "file"},
+                        "files": [
+                            "plate_000.png",
+                            "plate_001.png",
+                            "...",
                         ]
                     }
                 ),
@@ -97,32 +96,20 @@ class MyService(Service):
         )
         self._logger = get_logger(settings)
 
-    def process(self, data):
-        # NOTE that the data is a dictionary with the keys being the field names set in the data_in_fields
-        # The objects in the data variable are always bytes. It is necessary to convert them to the desired type
-        # before using them.
-        # raw = data["image"].data
-        # input_type = data["image"].type
-        # ... do something with the raw data
-
-        # Read input bytes
-        raw = data["image"].data  # bytes
-
+    def _process_single_image(self, raw: bytes, crop_index_offset: int):
         img = Image.open(io.BytesIO(raw)).convert("RGB")
         img_np = np.array(img)
 
         # Lazy-load YOLOv8 model once
         if not hasattr(self, "_model") or self._model is None:
-            # weights path provided by you
             self._model = YOLO("./model/licence_plate_detection_model.pt")
 
         # Inference
         results = self._model.predict(img_np, verbose=False)
         r0 = results[0]
 
-        # Build detections + crops zip in-memory
         detections = []
-        zip_buffer = io.BytesIO()
+        crops = []
 
         # Defensive: handle "no boxes" cleanly
         boxes = getattr(r0, "boxes", None)
@@ -132,54 +119,86 @@ class MyService(Service):
             clss = boxes.cls.cpu().numpy()  # (N,)
 
             names = getattr(r0, "names", None) or getattr(self._model, "names", None) or {}
-            with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-                for i, (bb, conf, cls_id) in enumerate(zip(xyxy, confs, clss)):
-                    x1, y1, x2, y2 = [int(round(v)) for v in bb.tolist()]
-                    # clamp to image bounds
-                    x1 = max(0, min(x1, img.width))
-                    x2 = max(0, min(x2, img.width))
-                    y1 = max(0, min(y1, img.height))
-                    y2 = max(0, min(y2, img.height))
+            for i, (bb, conf, cls_id) in enumerate(zip(xyxy, confs, clss)):
+                x1, y1, x2, y2 = [int(round(v)) for v in bb.tolist()]
+                # clamp to image bounds
+                x1 = max(0, min(x1, img.width))
+                x2 = max(0, min(x2, img.width))
+                y1 = max(0, min(y1, img.height))
+                y2 = max(0, min(y2, img.height))
 
-                    crop_name = f"plate_{i:03d}.png"
+                crop_name = f"plate_{crop_index_offset + i:03d}.png"
 
-                    # Crop and store as PNG
-                    crop = img.crop((x1, y1, x2, y2))
-                    crop_bytes_io = io.BytesIO()
-                    crop.save(crop_bytes_io, format="PNG")
-                    zf.writestr(crop_name, crop_bytes_io.getvalue())
+                # Crop and store as PNG bytes
+                crop = img.crop((x1, y1, x2, y2))
+                crop_bytes_io = io.BytesIO()
+                crop.save(crop_bytes_io, format="PNG")
+                crops.append(crop_bytes_io.getvalue())
 
-                    label = names.get(int(cls_id), "licence_plate")
+                label = names.get(int(cls_id), "licence_plate")
 
-                    detections.append(
-                        {
-                            "bbox": [x1, y1, x2, y2],
-                            "confidence": float(conf),
-                            "label": str(label),
-                            "crop_file": crop_name,
-                        }
-                    )
-        else:
-            # Create an empty zip (valid archive) even if no detections
-            with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED):
-                pass
+                detections.append(
+                    {
+                        "bbox": [x1, y1, x2, y2],
+                        "confidence": float(conf),
+                        "label": str(label),
+                        "crop_file": crop_name,
+                    }
+                )
 
-        zip_bytes = zip_buffer.getvalue()
-
-        # Output: JSON detections + ZIP of crops
         payload = {
             "image": "image",
             "count": len(detections),
             "detections": detections,
         }
 
+        return payload, crops
+
+    def process(self, data):
+        # NOTE that the data is a dictionary with the keys being the field names set in the data_in_fields
+        # The objects in the data variable are always bytes. It is necessary to convert them to the desired type
+        # before using them.
+        # raw = data["image"].data
+        # input_type = data["image"].type
+        # ... do something with the raw data
+
+        image_input = data["image"]
+
+        if isinstance(image_input, list):
+            if any(isinstance(item, list) for item in image_input):
+                raise ValueError("field 'image' must be a 1D list")
+            images = image_input
+        else:
+            images = [image_input]
+
+        if not self.allow_lists and len(images) != 1:
+            raise ValueError("field 'image' must contain exactly one item when allow_lists is false")
+
+        detections = []
+        crops = []
+        crop_index_offset = 0
+
+        for image in images:
+            payload, crop_bytes_list = self._process_single_image(image.data, crop_index_offset)
+
+            detections.append(
+                TaskData(
+                    data=json.dumps(payload).encode("utf-8"),
+                    type=FieldDescriptionType.APPLICATION_JSON,
+                )
+            )
+
+            for crop_bytes in crop_bytes_list:
+                crops.append(
+                    TaskData(
+                        data=crop_bytes,
+                        type=FieldDescriptionType.IMAGE_PNG,
+                    )
+                )
+
+            crop_index_offset += len(crop_bytes_list)
+
         return {
-            "detections": TaskData(
-                data=json.dumps(payload).encode("utf-8"),
-                type=FieldDescriptionType.APPLICATION_JSON,
-            ),
-            "crops": TaskData(
-                data=zip_bytes,
-                type=FieldDescriptionType.APPLICATION_ZIP,
-            ),
+            "detections": detections,
+            "crops": crops,
         }
